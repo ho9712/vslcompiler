@@ -1,5 +1,5 @@
-#include "Lexer.h"
-#include "Parser.h"
+#include "lexer.h"
+#include "parser.h"
 
 int main() {
 	// Install standard binary operators.
@@ -14,8 +14,14 @@ int main() {
 	fprintf(stderr, "ready> ");
 	getNextToken();
 
+	// Make the module, which holds all the code.
+	TheModule = llvm::make_unique<Module>("my cool jit", TheContext);
+
 	// Run the main "interpreter loop" now.
 	MainLoop();
+
+	// Print out all of the generated code.
+	TheModule->print(errs(), nullptr);
 
 	return 0;
 }

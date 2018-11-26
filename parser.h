@@ -1,7 +1,17 @@
 #ifndef __PARSER_H__
 #define __PARSER_H__
-#include "Lexer.h"
+#include "lexer.h"
+#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -10,6 +20,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+
+using namespace llvm;
 //===----------------------------------------------------------------------===//
 // Abstract Syntax Tree (aka Parse Tree)
 //===----------------------------------------------------------------------===//
@@ -18,6 +31,7 @@ namespace {
 	class ExprAST {
 	public:
 		virtual ~ExprAST() = default;
+		virtual Value *codegen() = 0;
 	};
 	
 
@@ -26,6 +40,7 @@ namespace {
 		int Val;
 	public:
 		NumberExprAST(int Val) : Val(Val) {}
+		Value *codegen() override;
 	};
 
 	//变量
@@ -33,6 +48,7 @@ namespace {
 		std::string Name;
 	public:
 		VariableExprAST(const std::string &Name) : Name(Name) {}
+		Value *codegen() override;
 	};
 
 	//运算符
@@ -44,6 +60,7 @@ namespace {
 		BinaryExprAST(char Op, std::unique_ptr<ExprAST> LHS,
 			std::unique_ptr<ExprAST> RHS)
 			: Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
+		Value *codegen() override;
 		
 	};
 
@@ -56,6 +73,7 @@ namespace {
 		PrototypeAST(const std::string &Name, std::vector<std::string> Args)
 			: Name(Name), Args(std::move(Args)) {}
 
+		Function *codegen();
 		const std::string &getName() const { return Name; }
 
 	};
@@ -69,10 +87,10 @@ namespace {
 		FunctionAST(std::unique_ptr<PrototypeAST> Proto,
 			std::unique_ptr<ExprAST> Body)
 			: Proto(std::move(Proto)), Body(std::move(Body)) {}
-
+		Function *codegen();
 	};
 
-	//函数调用
+	//调用
 	class CallExprAST : public ExprAST {
 		std::string Callee;
 		std::vector<std::unique_ptr<ExprAST>> Args;
@@ -81,6 +99,7 @@ namespace {
 		CallExprAST(const std::string &Callee,
 			std::vector<std::unique_ptr<ExprAST>> Args)
 			: Callee(Callee), Args(std::move(Args)) {}
+		Value *codegen() override;
 	};
 
 	//程序的抽象语法树
@@ -242,7 +261,6 @@ static std::unique_ptr<ExprAST> ParseExpression() {
 	auto LHS = ParsePrimary();
 	if (!LHS)
 		return nullptr;
-
 	return ParseBinOpRHS(0, std::move(LHS));
 }
 
@@ -257,12 +275,12 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
 
 	if (CurTok != '(')
 		return LogErrorP("Expected '(' in prototype");
-	getNextToken();
+	
 
 	std::vector<std::string> ArgNames;
 	while (getNextToken() == VARIABLE) {
 		ArgNames.push_back(IdentifierStr);
-		getNextToken();
+		
 	}
 	if (CurTok != ')')
 		return LogErrorP("Expected ')' in prototype");
@@ -289,8 +307,7 @@ static std::unique_ptr<FunctionAST> ParseFunc()
 	getNextToken();
 
 	auto E = ParseExpression();
-	if (!E)
-		return nullptr;
+	
 	if (CurTok != '}')
 	{
 		LogErrorP("Expected '}' in function");
@@ -314,13 +331,136 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 	return nullptr;
 }
 
+
+
+
+static LLVMContext TheContext;
+static IRBuilder<> Builder(TheContext);
+static std::unique_ptr<Module> TheModule;
+static std::map<std::string, Value *> NamedValues;
+
+Value *LogErrorV(const char *Str) {
+	LogError(Str);
+	return nullptr;
+}
+
+Value *NumberExprAST::codegen() {
+	return ConstantInt::get(TheContext, APInt(32, Val));
+}
+
+Value *VariableExprAST::codegen() {
+	// Look this variable up in the function.
+	Value *V = NamedValues[Name];
+	if (!V)
+		return LogErrorV("Unknown variable name");
+	return V;
+}
+
+Value *BinaryExprAST::codegen() {
+	Value *L = LHS->codegen();
+	Value *R = RHS->codegen();
+	if (!L || !R)
+		return nullptr;
+
+	switch (Op) {
+	case '+':
+		return Builder.CreateAdd(L, R, "addtmp");
+	case '-':
+		return Builder.CreateSub(L, R, "subtmp");
+	case '*':
+		return Builder.CreateMul(L, R, "multmp");
+	case '/':
+		L = Builder.CreateExactSDiv(L, R, "divtmp");
+		// Convert bool 0/1 to int 0 or 1
+		return Builder.CreateUIToFP(L, Type::getInt32Ty(TheContext), "booltmp");
+	default:
+		return LogErrorV("invalid binary operator");
+	}
+}
+
+Value *CallExprAST::codegen() {
+	// Look up the name in the global module table.
+	Function *CalleeF = TheModule->getFunction(Callee);
+	if (!CalleeF)
+		return LogErrorV("Unknown function referenced");
+
+	// If argument mismatch error.
+	if (CalleeF->arg_size() != Args.size())
+		return LogErrorV("Incorrect # arguments passed");
+
+	std::vector<Value *> ArgsV;
+	for (unsigned i = 0, e = Args.size(); i != e; ++i) {
+		ArgsV.push_back(Args[i]->codegen());
+		if (!ArgsV.back())
+			return nullptr;
+	}
+
+	return Builder.CreateCall(CalleeF, ArgsV, "calltmp");
+}
+
+Function *PrototypeAST::codegen() {
+	// Make the function type:  double(double,double) etc.
+	std::vector<Type*> Integers(Args.size(),
+		Type::getInt32Ty(TheContext));
+	FunctionType *FT =
+		FunctionType::get(Type::getInt32Ty(TheContext), Integers, false);
+
+	Function *F =
+		Function::Create(FT, Function::ExternalLinkage, Name, TheModule.get());
+
+	// Set names for all arguments.
+	unsigned Idx = 0;
+	for (auto &Arg : F->args())
+		Arg.setName(Args[Idx++]);
+
+	return F;
+}
+
+Function *FunctionAST::codegen() {
+	// First, check for an existing function from a previous 'extern' declaration.
+	Function *TheFunction = TheModule->getFunction(Proto->getName());
+
+	if (!TheFunction)
+		TheFunction = Proto->codegen();
+
+	if (!TheFunction)
+		return nullptr;
+
+	// Create a new basic block to start insertion into.
+	BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
+	Builder.SetInsertPoint(BB);
+
+	// Record the function arguments in the NamedValues map.
+	NamedValues.clear();
+	for (auto &Arg : TheFunction->args())
+		NamedValues[Arg.getName()] = &Arg;
+
+	if (Value *RetVal = Body->codegen()) {
+		// Finish off the function.
+		Builder.CreateRet(RetVal);
+
+		// Validate the generated code, checking for consistency.
+		verifyFunction(*TheFunction);
+
+		return TheFunction;
+	}
+
+	// Error reading body, remove function.
+	TheFunction->eraseFromParent();
+	return nullptr;
+}
+
 //===----------------------------------------------------------------------===//
 // Top-Level parsing
 //===----------------------------------------------------------------------===//
 
 static void HandleDefinition() {
-	if (ParseFunc()) {
-		fprintf(stderr, "Parsed a function definition.\n");
+	if (auto FnAST = ParseFunc()) {
+		if (auto *FnIR = FnAST->codegen()) {
+			fprintf(stderr, "Read function definition:");
+			FnIR->print(errs());
+			fprintf(stderr, "\n");
+		}
 	}
 	else {
 		// Skip token for error recovery.
@@ -330,15 +470,17 @@ static void HandleDefinition() {
 
 
 static void HandleTopLevelExpression() {
-	// Evaluate a top-level expression into an anonymous function.
-
-	if (ParseTopLevelExpr()) {
-		fprintf(stderr, "Parsed a top-level expr\n");
-	}
-	else {
-		// Skip token for error recovery.
-		getNextToken();
-	}
+	 // Evaluate a top-level expression into an anonymous function.
+  if (auto FnAST = ParseTopLevelExpr()) {
+    if (auto *FnIR = FnAST->codegen()) {
+      fprintf(stderr, "Read top-level expression:");
+      FnIR->print(errs());
+      fprintf(stderr, "\n");
+    }
+  } else {
+    // Skip token for error recovery.
+    getNextToken();
+  }
 }
 
 /// top ::= definition | external | expression | ';'
