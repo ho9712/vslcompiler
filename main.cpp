@@ -4,6 +4,9 @@
 #include "llvm/Target/TargetMachine.h"
 #include "../include/KaleidoscopeJIT.h"
 
+/*
+  µÚËÄ°æ
+*/
 
 
 int main() {
