@@ -11,7 +11,7 @@
 #include <vector>
 
 //===----------------------------------------------------------------------===//
-// Lexer  µÚËÄ°æ
+// Lexer
 //===----------------------------------------------------------------------===//
 
 enum Token
@@ -97,9 +97,21 @@ static int gettok() {
 		return ASSIGN_SYMBOL;
 	}
 
-	if (LastChar == '\"' || LastChar == '\n') {//text:  \"({ascii_char}|{escaped_char})*\" 
+	if (LastChar == '\"') {//text:  \"({ascii_char}|{escaped_char})*\" 
 		do
 		{
+			if (LastChar == '\\')
+			{
+				LastChar = getchar();
+				if (LastChar == 'n')
+					LastChar = '\n';
+				else if (LastChar == 't')
+					LastChar = '\t';
+				else if (LastChar == 'r')
+					LastChar = '\r';
+				else
+					IdentifierStr += '\\';
+			}
 			IdentifierStr += LastChar;
 			LastChar = getchar();
 		} while (LastChar != '\"' || LastChar != '\n');

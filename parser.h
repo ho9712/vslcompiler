@@ -1,6 +1,6 @@
 #ifndef __PARSER_H__
 #define __PARSER_H__
-#include "lexer.h"
+#include"lexer.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -28,9 +28,6 @@
 #include <vector>
 #include "../include/KaleidoscopeJIT.h"
 
-/*
-  第四版
-*/
 
 using namespace llvm;
 using namespace llvm::orc;
@@ -113,6 +110,18 @@ namespace {
 		Value *codegen() override;
 	};
 
+	//If条件
+	class IfExprAST : public ExprAST {
+		std::unique_ptr<ExprAST> Cond, Then, Else;
+
+	public:
+		IfExprAST(std::unique_ptr<ExprAST> Cond, std::unique_ptr<ExprAST> Then,
+			std::unique_ptr<ExprAST> Else)
+			: Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
+
+		Value *codegen() override;
+	};
+
 	//程序的抽象语法树
 	class ProgramAST {
 		std::vector<std::unique_ptr<FunctionAST>> funcs;
@@ -156,8 +165,13 @@ std::unique_ptr<PrototypeAST> LogErrorP(const char *Str) {
 	LogError(Str);
 	return nullptr;
 }
+std::unique_ptr<FunctionAST> LogErrorF(const char *Str) {
+	LogError(Str);
+	return nullptr;
+}
 
 static std::unique_ptr<ExprAST> ParseExpression();
+static std::unique_ptr<ExprAST> ParseIfExpr();
 
 //解析数字
 static std::unique_ptr<ExprAST> ParseNumberExpr() {
@@ -224,6 +238,8 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
 		return ParseNumberExpr();
 	case '(':
 		return ParseParenExpr();
+	case IF:
+		return  ParseIfExpr();
 	default:
 		return LogError("unknown token when expecting an expression");
 	}
@@ -245,7 +261,7 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
 		if (TokPrec < ExprPrec)
 			return LHS;
 
-		if (CurTok == '}')
+		if (CurTok == ';')
 			return LHS;
 
 		// Okay, we know this is a binop.
@@ -350,6 +366,42 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 		return llvm::make_unique<FunctionAST>(std::move(Proto), std::move(E));
 	}
 	return nullptr;
+}
+
+//parse if语句
+static std::unique_ptr<ExprAST> ParseIfExpr() {
+	getNextToken();  // eat the if.
+
+	// condition.
+	auto Cond = ParseExpression();
+	if (!Cond)
+		return nullptr;
+
+	if (CurTok != THEN)
+		return LogError("expected then");
+	getNextToken();  // eat the then
+
+	auto Then = ParseExpression();
+	if (!Then)
+		return nullptr;
+
+	std::unique_ptr<ExprAST> Else = nullptr;
+	if (CurTok == ELSE) {
+		getNextToken();
+		Else = ParseExpression();
+		if (!Else)
+			return nullptr;
+	}
+	else if (CurTok != FI)
+		return LogError("expected FI or ELSE");
+
+	if (CurTok != FI)
+		return LogError("expected FI");
+
+	getNextToken();
+
+	return llvm::make_unique<IfExprAST>(std::move(Cond), std::move(Then),
+		std::move(Else));
 }
 //===----------------------------------------------------------------------===//
 // Code Generation
@@ -491,6 +543,58 @@ Function *FunctionAST::codegen() {
 	return nullptr;
 }
 
+Value *IfExprAST::codegen() {
+	Value *CondV = Cond->codegen();
+	if (!CondV)
+		return nullptr;
+
+	// Convert condition to a bool by comparing non-equal to 0.0.
+	CondV = Builder.CreateICmpNE(
+		CondV, Builder.getInt32(0), "ifcond");
+
+	Function *TheFunction = Builder.GetInsertBlock()->getParent();
+
+	// Create blocks for the then and else cases.  Insert the 'then' block at the
+	// end of the function.
+	BasicBlock *ThenBB = BasicBlock::Create(TheContext, "then", TheFunction);
+	BasicBlock *ElseBB = BasicBlock::Create(TheContext, "else");
+	BasicBlock *MergeBB = BasicBlock::Create(TheContext, "ifcont");
+
+	Builder.CreateCondBr(CondV, ThenBB, ElseBB);
+
+	// Emit then value.
+	Builder.SetInsertPoint(ThenBB);
+
+	Value *ThenV = Then->codegen();
+	if (!ThenV)
+		return nullptr;
+
+	Builder.CreateBr(MergeBB);
+	// Codegen of 'Then' can change the current block, update ThenBB for the PHI.
+	ThenBB = Builder.GetInsertBlock();
+
+	// Emit else block.
+	TheFunction->getBasicBlockList().push_back(ElseBB);
+	Builder.SetInsertPoint(ElseBB);
+
+	Value *ElseV = Else->codegen();
+	if (!ElseV)
+		return nullptr;
+
+	Builder.CreateBr(MergeBB);
+	// Codegen of 'Else' can change the current block, update ElseBB for the PHI.
+	ElseBB = Builder.GetInsertBlock();
+
+	// Emit merge block.
+	TheFunction->getBasicBlockList().push_back(MergeBB);
+	Builder.SetInsertPoint(MergeBB);
+	PHINode *PN = Builder.CreatePHI(Type::getInt32Ty(TheContext), 2, "iftmp");
+
+	PN->addIncoming(ThenV, ThenBB);
+	PN->addIncoming(ElseV, ElseBB);
+	return PN;
+}
+
 //===----------------------------------------------------------------------===//
 // Top-Level parsing and JIT Driver
 //===----------------------------------------------------------------------===//
@@ -549,7 +653,8 @@ static void HandleTopLevelExpression() {
 			// Get the symbol's address and cast it to the right type (takes no
 			// arguments, returns a double) so we can call it as a native function.
 			
-			fprintf(stderr, "Evaluated to 3\n");
+			int(*FP)() = (int(*)())cantFail(ExprSymbol.getAddress());
+			fprintf(stderr, "Evaluated to %d\n", FP());
 
 			// Delete the anonymous expression module from the JIT.
 			TheJIT->removeModule(H);
