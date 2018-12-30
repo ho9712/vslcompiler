@@ -29,6 +29,7 @@ int main() {
 	// Run the main "interpreter loop" now.
 	MainLoop();
 
+	//windows ctrl+Z linux ctrl+D Ìø³ömainloop
 	auto TargetTriple = sys::getDefaultTargetTriple();
     TheModule->setTargetTriple(TargetTriple);
 	// Initialize the target registry etc.
