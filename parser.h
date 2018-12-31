@@ -568,7 +568,7 @@ static std::unique_ptr<StatAST> ParseWhileStat() {
 	if (CurTok != '{')
 		return LogError("expected {");
 	getNextToken();  // eat the {
-	auto Do = ParseExpression();
+	auto Do = ParseStatement();		
 	if (!Do)
 		return nullptr;
 
@@ -780,13 +780,19 @@ Function *FunctionAST::codegen() {
 	    NamedValues[Arg.getName()] = Alloca;
 	}
 		
-	Body->codegen();
+	if (Value *RetVal = Body->codegen()) {
+		// Finish off the function.
+		Builder.CreateRet(RetVal);
 
-	Builder.CreateRet(Builder.getInt32(0)); //如果函数没有返回语句，添加个RETURN 0
-	verifyFunction(*TheFunction);
+		// Validate the generated code, checking for consistency.
+		verifyFunction(*TheFunction);
 
-	return TheFunction;
-	
+		return TheFunction;
+	}
+
+	TheFunction->eraseFromParent();
+	return nullptr;
+
 }
 
 Value *IfStatAST::codegen() {
@@ -983,7 +989,10 @@ static void HandleDefinition() {
 static void HandleTopLevelExpression() {
 	// Evaluate a top-level expression into an anonymous function.
 	if (auto FnAST = ParseTopLevelExpr()) {
-		if (FnAST->codegen()) {
+		if (auto *FnIR =  FnAST->codegen()) {
+			fprintf(stderr, "Read function call:");
+			FnIR->print(errs());
+			fprintf(stderr, "\n");
 			// JIT the module containing the anonymous expression, keeping a handle so
 			// we can free it later.
 			auto H = TheJIT->addModule(std::move(TheModule));
@@ -996,8 +1005,8 @@ static void HandleTopLevelExpression() {
 			// Get the symbol's address and cast it to the right type (takes no
 			// arguments, returns a double) so we can call it as a native function.
 			
-			int(*FP)() = (int(*)())cantFail(ExprSymbol.getAddress());
-			fprintf(stderr, "Evaluated to %d\n", FP());
+			/*int(*FP)() = (int(*)())cantFail(ExprSymbol.getAddress());
+			fprintf(stderr, "Evaluated to %d\n", FP());*/
 
 			// Delete the anonymous expression module from the JIT.
 			TheJIT->removeModule(H);
