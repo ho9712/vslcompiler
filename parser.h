@@ -48,23 +48,13 @@ namespace {
 	};
 
 
-	//statement 基类
+	//statement抽象语法树基类
 	class StatAST {
 	public:
 		virtual ~StatAST() = default;
 		virtual Value* codegen() = 0;
 	};
 
-	std::unique_ptr<StatAST> LogError(const char *Str) {
-		fprintf(stderr, "Error: %s\n", Str);
-		return nullptr;
-	}
-
-	//report errors found during code generation
-	Value *LogErrorV(const char *Str) {
-		LogError(Str);
-		return nullptr;
-	}
 
 	//数字抽象语法树
 	class NumberExprAST : public StatAST {
@@ -123,7 +113,7 @@ namespace {
 
 
 
-	//变量声明语句
+	//变量声明 语法树
 	class DecStatAST : public StatAST {
 		std::vector<std::string> VarNames;
 		std::unique_ptr<StatAST> Body;
@@ -135,7 +125,7 @@ namespace {
 		Value *codegen() override;
 	};
 
-	//块语句
+	//block 函数快语法树
 	class BlockStatAST : public StatAST {
 		std::vector<std::unique_ptr<StatAST>> DecList;
 		std::vector<std::unique_ptr<StatAST>> StatList;
@@ -163,6 +153,7 @@ namespace {
 		Value *codegen() override;
 	};
 
+    //RETURN　语法树
 	class RetStatAST : public StatAST {
 		std::unique_ptr<StatAST> Val;
 
@@ -173,6 +164,7 @@ namespace {
 		Value *codegen() override;
 	};
 
+	//Assignment 语法树
 	class AssStatAST : public StatAST {
 		std::unique_ptr<VariableExprAST> Name;
 		std::unique_ptr<StatAST> Expression;
@@ -227,6 +219,17 @@ namespace {
 
 		Value *codegen() override;
 	};
+
+	std::unique_ptr<StatAST> LogError(const char *Str) {
+		fprintf(stderr, "Error: %s\n", Str);
+		return nullptr;
+	}
+
+	Value *LogErrorV(const char *Str) {
+		LogError(Str);
+		return nullptr;
+	}
+
 	
 } // end anonymous namespace
 
@@ -373,13 +376,12 @@ static std::unique_ptr<StatAST> ParseStatement()
 		return ParseWhileStat();
 		break;
 	default:
-		auto E = ParseAssStat();
-		return E;
+		return ParseAssStat();
 	}
 }
+//解析函数块
 //block::='{' declaration_list statement_list '}'
 static std::unique_ptr<StatAST> ParseBlock() {
-	//存储变量声明语句及其他语句
 	std::vector<std::unique_ptr<StatAST>> DecList;
 	std::vector<std::unique_ptr<StatAST>> StatList;
 	getNextToken();   //eat '{'
@@ -388,10 +390,7 @@ static std::unique_ptr<StatAST> ParseBlock() {
 		DecList.push_back(std::move(varDec));
 	}
 	while (CurTok != '}') {
-		if (CurTok == VAR) {
-			LogError("Can't declare VAR here!");
-		}
-		else if (CurTok == '{') {
+        if (CurTok == '{') {
 			ParseBlock();
 		}
 		else if (CurTok == CONTINUE) {
@@ -853,20 +852,21 @@ Value *WhileStatAST::codegen() {
 	BasicBlock *LoopBB = BasicBlock::Create(TheContext, "loop", TheFunction);
 	BasicBlock *AfterBB = BasicBlock::Create(TheContext, "afterLoop", TheFunction);
 
-	Value *EndCond = While->codegen();
-	if (!EndCond)
+	Value *WhileV = While->codegen();
+	if (!WhileV)
 		return nullptr;
-	EndCond = Builder.CreateICmpNE(EndCond, Builder.getInt32(0),
-		"loopCondIn");
-	Builder.CreateCondBr(EndCond, LoopBB, AfterBB);
+	WhileV = Builder.CreateICmpNE(WhileV, Builder.getInt32(0),
+		"inLoop");
+	//类似if判断
+	Builder.CreateCondBr(WhileV, LoopBB, AfterBB);
 
 	Builder.SetInsertPoint(LoopBB);
-	Value *inLoopVal = Do->codegen();
-	if (!inLoopVal)
+	Value *DoV = Do->codegen();
+	if (!DoV)
 		return nullptr;
-	EndCond = Builder.CreateICmpNE(While->codegen(),
-		Builder.getInt32(0), "loopCondOut");
-	Builder.CreateCondBr(EndCond, LoopBB, AfterBB);
+	WhileV = Builder.CreateICmpNE(While->codegen(),
+		Builder.getInt32(0), "outLoop");
+	Builder.CreateCondBr(WhileV, LoopBB, AfterBB);
 
 	Builder.SetInsertPoint(AfterBB);
 
